@@ -54,6 +54,7 @@ public final class DuplexTest {
   private OkHttpClient client;
 
   @Before public void setUp() {
+    platform.assumeNotOpenJSSE();
     platform.assumeHttp2Support();
     client = clientTestRule.newClientBuilder()
         .eventListener(listener)
@@ -242,7 +243,7 @@ public final class DuplexTest {
     mockDuplexResponseBody.awaitSuccess();
 
     assertThat(listener.recordedEventTypes()).containsExactly(
-        "CallStart", "DnsStart", "DnsEnd", "ConnectStart",
+        "CallStart", "ProxySelectStart", "ProxySelectEnd", "DnsStart", "DnsEnd", "ConnectStart",
         "SecureConnectStart", "SecureConnectEnd", "ConnectEnd", "ConnectionAcquired",
         "RequestHeadersStart", "RequestHeadersEnd", "RequestBodyStart", "ResponseHeadersStart",
         "ResponseHeadersEnd", "ResponseBodyStart", "ResponseBodyEnd", "RequestBodyEnd",
@@ -342,7 +343,7 @@ public final class DuplexTest {
     mockDuplexResponseBody.awaitSuccess();
 
     assertThat(listener.recordedEventTypes()).containsExactly(
-        "CallStart", "DnsStart", "DnsEnd", "ConnectStart",
+        "CallStart", "ProxySelectStart", "ProxySelectEnd", "DnsStart", "DnsEnd", "ConnectStart",
         "SecureConnectStart", "SecureConnectEnd", "ConnectEnd", "ConnectionAcquired",
         "RequestHeadersStart", "RequestHeadersEnd", "RequestBodyStart", "ResponseHeadersStart",
         "ResponseHeadersEnd", "ResponseBodyStart", "ResponseBodyEnd", "RequestHeadersStart",

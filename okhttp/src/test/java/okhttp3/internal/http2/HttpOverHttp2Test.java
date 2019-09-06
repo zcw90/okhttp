@@ -63,13 +63,13 @@ import okhttp3.mockwebserver.PushPromise;
 import okhttp3.mockwebserver.QueueDispatcher;
 import okhttp3.mockwebserver.RecordedRequest;
 import okhttp3.mockwebserver.SocketPolicy;
+import okhttp3.testing.Flaky;
 import okhttp3.testing.PlatformRule;
 import okhttp3.tls.HandshakeCertificates;
 import okio.Buffer;
 import okio.BufferedSink;
 import okio.GzipSink;
 import okio.Okio;
-import org.jetbrains.annotations.NotNull;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -97,7 +97,11 @@ import static org.junit.Assume.assumeTrue;
 
 /** Test how HTTP/2 interacts with HTTP features. */
 @RunWith(Parameterized.class)
+@Flaky
 public final class HttpOverHttp2Test {
+  // Flaky https://github.com/square/okhttp/issues/4632
+  // Flaky https://github.com/square/okhttp/issues/4633
+
   private static final Logger http2Logger = Logger.getLogger(Http2.class.getName());
   private static final HandshakeCertificates handshakeCertificates = localhost();
 
@@ -125,6 +129,8 @@ public final class HttpOverHttp2Test {
   }
 
   @Before public void setUp() {
+    platform.assumeNotOpenJSSE();
+
     if (protocol == Protocol.HTTP_2) {
       platform.assumeHttp2Support();
       server.useHttps(handshakeCertificates.sslSocketFactory(), false);
@@ -1227,6 +1233,7 @@ public final class HttpOverHttp2Test {
         (long) 1);
   }
 
+  @Flaky
   @Test public void missingPongsFailsConnection() throws Exception {
     if (protocol == Protocol.HTTP_2) {
       // https://github.com/square/okhttp/issues/5221
@@ -1405,7 +1412,9 @@ public final class HttpOverHttp2Test {
     assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(0);
   }
 
+  @Flaky
   @Test public void responseHeadersAfterGoaway() throws Exception {
+    // Flaky https://github.com/square/okhttp/issues/4836
     server.enqueue(new MockResponse()
         .setHeadersDelay(1, SECONDS)
         .setBody("ABC"));
@@ -1595,7 +1604,7 @@ public final class HttpOverHttp2Test {
     client = client.newBuilder().eventListener(new EventListener() {
       int callCount;
 
-      @Override public void connectionAcquired(@NotNull Call call, @NotNull Connection connection) {
+      @Override public void connectionAcquired(Call call, Connection connection) {
         try {
           if (callCount++ == 1) {
             server.shutdown();
