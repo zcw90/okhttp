@@ -33,7 +33,7 @@ import okhttp3.Response
 import okhttp3.Route
 import okhttp3.internal.EMPTY_RESPONSE
 import okhttp3.internal.closeQuietly
-import okhttp3.internal.toHostHeader
+import okhttp3.internal.concurrent.TaskRunner
 import okhttp3.internal.http.ExchangeCodec
 import okhttp3.internal.http1.Http1ExchangeCodec
 import okhttp3.internal.http2.ConnectionShutdownException
@@ -41,9 +41,11 @@ import okhttp3.internal.http2.ErrorCode
 import okhttp3.internal.http2.Http2Connection
 import okhttp3.internal.http2.Http2ExchangeCodec
 import okhttp3.internal.http2.Http2Stream
+import okhttp3.internal.http2.Settings
 import okhttp3.internal.http2.StreamResetException
 import okhttp3.internal.platform.Platform
 import okhttp3.internal.tls.OkHostnameVerifier
+import okhttp3.internal.toHostHeader
 import okhttp3.internal.userAgent
 import okhttp3.internal.ws.RealWebSocket
 import okio.BufferedSink
@@ -188,6 +190,7 @@ class RealConnection(
         handshake = null
         protocol = null
         http2Connection = null
+        allocationLimit = 1
 
         eventListener.connectFailed(call, route.socketAddress, route.proxy, null, e)
 
@@ -206,13 +209,6 @@ class RealConnection(
     if (route.requiresTunnel() && rawSocket == null) {
       throw RouteException(ProtocolException(
           "Too many tunnel connections attempted: $MAX_TUNNEL_ATTEMPTS"))
-    }
-
-    val http2Connection = this.http2Connection
-    if (http2Connection != null) {
-      synchronized(connectionPool) {
-        allocationLimit = http2Connection.maxConcurrentStreams()
-      }
     }
   }
 
@@ -321,12 +317,13 @@ class RealConnection(
     val source = this.source!!
     val sink = this.sink!!
     socket.soTimeout = 0 // HTTP/2 connection timeouts are set per-stream.
-    val http2Connection = Http2Connection.Builder(true)
+    val http2Connection = Http2Connection.Builder(client = true, taskRunner = TaskRunner.INSTANCE)
         .socket(socket, route.address.url.host, source, sink)
         .listener(this)
         .pingIntervalMillis(pingIntervalMillis)
         .build()
     this.http2Connection = http2Connection
+    this.allocationLimit = Http2Connection.DEFAULT_SETTINGS.getMaxConcurrentStreams()
     http2Connection.start()
   }
 
@@ -344,7 +341,7 @@ class RealConnection(
       // Configure the socket's ciphers, TLS versions, and extensions.
       val connectionSpec = connectionSpecSelector.configureSecureSocket(sslSocket)
       if (connectionSpec.supportsTlsExtensions) {
-        Platform.get().configureTlsExtensions(sslSocket, address.url.host, address.protocols)
+        Platform.get().configureTlsExtensions(sslSocket, address.protocols)
       }
 
       // Force handshake. This can throw!
@@ -370,9 +367,18 @@ class RealConnection(
         }
       }
 
+      val certificatePinner = address.certificatePinner!!
+
+      handshake = Handshake(unverifiedHandshake.tlsVersion, unverifiedHandshake.cipherSuite,
+          unverifiedHandshake.localCertificates) {
+        certificatePinner.certificateChainCleaner!!.clean(unverifiedHandshake.peerCertificates,
+            address.url.host)
+      }
+
       // Check that the certificate pinner is satisfied by the certificates presented.
-      address.certificatePinner!!.check(address.url.host,
-          unverifiedHandshake.peerCertificates)
+      certificatePinner.check(address.url.host) {
+        handshake!!.peerCertificates.map { it as X509Certificate }
+      }
 
       // Success! Save the handshake and the ALPN protocol.
       val maybeProtocol = if (connectionSpec.supportsTlsExtensions) {
@@ -383,7 +389,6 @@ class RealConnection(
       socket = sslSocket
       source = sslSocket.source().buffer()
       sink = sslSocket.sink().buffer()
-      handshake = unverifiedHandshake
       protocol = if (maybeProtocol != null) Protocol.get(maybeProtocol) else Protocol.HTTP_1_1
       success = true
     } finally {
@@ -636,9 +641,9 @@ class RealConnection(
   }
 
   /** When settings are received, adjust the allocation limit. */
-  override fun onSettings(connection: Http2Connection) {
+  override fun onSettings(connection: Http2Connection, settings: Settings) {
     synchronized(connectionPool) {
-      allocationLimit = connection.maxConcurrentStreams()
+      allocationLimit = settings.getMaxConcurrentStreams()
     }
   }
 

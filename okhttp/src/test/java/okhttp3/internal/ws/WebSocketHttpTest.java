@@ -36,6 +36,7 @@ import okhttp3.Response;
 import okhttp3.TestLogHandler;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
+import okhttp3.internal.concurrent.TaskRunner;
 import okhttp3.mockwebserver.Dispatcher;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -72,28 +73,23 @@ public final class WebSocketHttpTest {
   private final WebSocketRecorder clientListener = new WebSocketRecorder("client");
   private final WebSocketRecorder serverListener = new WebSocketRecorder("server");
   private final Random random = new Random(0);
-  private OkHttpClient client;
+  private OkHttpClient client = clientTestRule.newClientBuilder()
+      .writeTimeout(500, TimeUnit.MILLISECONDS)
+      .readTimeout(500, TimeUnit.MILLISECONDS)
+      .addInterceptor(chain -> {
+        Response response = chain.proceed(chain.request());
+        // Ensure application interceptors never see a null body.
+        assertThat(response.body()).isNotNull();
+        return response;
+      })
+      .build();
 
   @Before public void setUp() {
     platform.assumeNotOpenJSSE();
-
-    client = clientTestRule.newClientBuilder()
-        .writeTimeout(500, TimeUnit.MILLISECONDS)
-        .readTimeout(500, TimeUnit.MILLISECONDS)
-        .addInterceptor(chain -> {
-          Response response = chain.proceed(chain.request());
-          // Ensure application interceptors never see a null body.
-          assertThat(response.body()).isNotNull();
-          return response;
-        })
-        .build();
   }
 
   @After public void tearDown() {
     clientListener.assertExhausted();
-
-    // TODO: assert all connections are released once leaks are fixed
-    clientTestRule.abandonClient();
   }
 
   @Test public void textMessage() {
@@ -803,7 +799,7 @@ public final class WebSocketHttpTest {
 
   private RealWebSocket newWebSocket(Request request) {
     RealWebSocket webSocket = new RealWebSocket(
-        request, clientListener, random, client.pingIntervalMillis());
+        TaskRunner.INSTANCE, request, clientListener, random, client.pingIntervalMillis());
     webSocket.connect(client);
     return webSocket;
   }

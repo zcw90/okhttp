@@ -26,6 +26,7 @@ import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.ProtocolException;
 import java.net.Proxy;
+import java.net.SocketException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.UnknownServiceException;
@@ -110,7 +111,9 @@ public final class CallTest {
 
   private RecordingEventListener listener = new RecordingEventListener();
   private HandshakeCertificates handshakeCertificates = localhost();
-  private OkHttpClient client;
+  private OkHttpClient client = clientTestRule.newClientBuilder()
+      .eventListener(listener)
+      .build();
   private RecordingCallback callback = new RecordingCallback();
   private TestLogHandler logHandler = new TestLogHandler();
   private Cache cache = new Cache(new File("/cache/"), Integer.MAX_VALUE, fileSystem);
@@ -120,9 +123,6 @@ public final class CallTest {
     platform.assumeNotOpenJSSE();
 
     logger.addHandler(logHandler);
-    client = clientTestRule.newClientBuilder()
-        .eventListener(listener)
-        .build();
   }
 
   @After public void tearDown() throws Exception {
@@ -787,6 +787,63 @@ public final class CallTest {
     assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(2);
   }
 
+  /**
+   * Each OkHttpClient used to get its own instance of NullProxySelector, and because these weren't
+   * equal their connections weren't pooled. That's a nasty performance bug!
+   *
+   * https://github.com/square/okhttp/issues/5519
+   */
+  @Test public void connectionPoolingWithFreshClientSamePool() throws Exception {
+    server.enqueue(new MockResponse().setBody("abc"));
+    server.enqueue(new MockResponse().setBody("def"));
+    server.enqueue(new MockResponse().setBody("ghi"));
+
+    client = new OkHttpClient.Builder()
+        .connectionPool(client.connectionPool())
+        .proxy(server.toProxyAddress())
+        .build();
+    executeSynchronously("/a").assertBody("abc");
+
+    client = new OkHttpClient.Builder()
+        .connectionPool(client.connectionPool())
+        .proxy(server.toProxyAddress())
+        .build();
+    executeSynchronously("/b").assertBody("def");
+
+    client = new OkHttpClient.Builder()
+        .connectionPool(client.connectionPool())
+        .proxy(server.toProxyAddress())
+        .build();
+    executeSynchronously("/c").assertBody("ghi");
+
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(0);
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(1);
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(2);
+  }
+
+  @Test public void connectionPoolingWithClientBuiltOffProxy() throws Exception {
+    client = new OkHttpClient.Builder()
+        .proxy(server.toProxyAddress())
+        .build();
+
+    server.enqueue(new MockResponse().setBody("abc"));
+    server.enqueue(new MockResponse().setBody("def"));
+    server.enqueue(new MockResponse().setBody("ghi"));
+
+    client = client.newBuilder().build();
+    executeSynchronously("/a").assertBody("abc");
+
+    client = client.newBuilder().build();
+    executeSynchronously("/b").assertBody("def");
+
+    client = client.newBuilder().build();
+    executeSynchronously("/c").assertBody("ghi");
+
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(0);
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(1);
+    assertThat(server.takeRequest().getSequenceNumber()).isEqualTo(2);
+  }
+
   @Test public void connectionPooling_Async() throws Exception {
     server.enqueue(new MockResponse().setBody("abc"));
     server.enqueue(new MockResponse().setBody("def"));
@@ -900,7 +957,6 @@ public final class CallTest {
 
     server.enqueue(new MockResponse()
         .setBody("success!"));
-
     client = client.newBuilder()
         .proxySelector(proxySelector)
         .readTimeout(100, TimeUnit.MILLISECONDS)
@@ -940,12 +996,15 @@ public final class CallTest {
   }
 
   /** https://github.com/square/okhttp/issues/4761 */
-  @Test public void interceptorCallsProceedWithoutClosingPriorResponse() throws Exception {
+  @Test
+  public void interceptorCallsProceedWithoutClosingPriorResponse() throws Exception {
     server.enqueue(new MockResponse()
+        .setBodyDelay(250, TimeUnit.MILLISECONDS)
         .setBody("abc"));
-    server.enqueue(new MockResponse());
+    server.enqueue(new MockResponse()
+        .setBody("def"));
 
-    client = client.newBuilder()
+    client = clientTestRule.newClientBuilder()
         .addInterceptor(new Interceptor() {
           @Override public Response intercept(Chain chain) throws IOException {
             Response response = chain.proceed(chain.request());
@@ -964,8 +1023,7 @@ public final class CallTest {
         .url(server.url("/"))
         .build();
     executeSynchronously(request)
-        .assertCode(200)
-        .assertBody("abc");
+        .assertFailure(SocketException.class);
   }
 
   /**
@@ -1964,7 +2022,7 @@ public final class CallTest {
           }
 
           @Override public void writeTo(BufferedSink sink) throws IOException {
-            sink.writeUtf8("attempt " + (attempt++));
+            sink.writeUtf8("attempt " + attempt++);
           }
         })
         .build();
@@ -1995,7 +2053,7 @@ public final class CallTest {
           }
 
           @Override public void writeTo(BufferedSink sink) throws IOException {
-            sink.writeUtf8("attempt " + (attempt++));
+            sink.writeUtf8("attempt " + attempt++);
           }
 
           @Override public boolean isOneShot() {
@@ -2318,7 +2376,7 @@ public final class CallTest {
     call.cancel();
     latch.countDown();
 
-    callback.await(server.url("/a")).assertFailure("Canceled", "Socket closed");
+    callback.await(server.url("/a")).assertFailure("Canceled", "Socket closed", "Socket is closed");
   }
 
   @Test public void cancelAll() throws Exception {
@@ -2327,7 +2385,7 @@ public final class CallTest {
         .build());
     call.enqueue(callback);
     client.dispatcher().cancelAll();
-    callback.await(server.url("/")).assertFailure("Canceled", "Socket closed");
+    callback.await(server.url("/")).assertFailure("Canceled", "Socket closed", "Socket is closed");
   }
 
   @Test
@@ -2394,6 +2452,8 @@ public final class CallTest {
       fail();
     } catch (IOException expected) {
     }
+
+    assertThat(server.takeRequest().getPath()).isEqualTo("/a");
   }
 
   @Test public void cancelInFlightBeforeResponseReadThrowsIOE_HTTPS() throws Exception {
@@ -3730,12 +3790,15 @@ public final class CallTest {
           }
 
           @Override public void writeTo(BufferedSink sink) throws IOException {
+            sink.flush(); // For determinism, always send a partial request to the server.
             throw new IOException("boom");
           }
         })
         .build();
 
     executeSynchronously(request).assertFailure("boom");
+
+    assertThat(server.takeRequest().getFailure()).isNotNull();
   }
 
   @Test public void requestBodyThrowsUnrelatedToNetwork_HTTP2() throws Exception {
@@ -3783,6 +3846,7 @@ public final class CallTest {
       }
 
       @Override public void writeTo(BufferedSink sink) throws IOException {
+        sink.flush(); // For determinism, always send a partial request to the server.
         throw new IOException("write body fail!");
       }
     };

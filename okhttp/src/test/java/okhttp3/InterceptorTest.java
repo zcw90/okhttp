@@ -39,7 +39,6 @@ import okio.GzipSink;
 import okio.Okio;
 import okio.Sink;
 import okio.Source;
-import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 
@@ -50,12 +49,8 @@ public final class InterceptorTest {
   @Rule public MockWebServer server = new MockWebServer();
   @Rule public final OkHttpClientTestRule clientTestRule = new OkHttpClientTestRule();
 
-  private OkHttpClient client;
+  private OkHttpClient client = clientTestRule.newClient();
   private RecordingCallback callback = new RecordingCallback();
-
-  @Before public void setUp() {
-    client = clientTestRule.newClient();
-  }
 
   @Test public void applicationInterceptorsCanShortCircuitResponses() throws Exception {
     server.shutdown(); // Accept no connections.
@@ -521,11 +516,12 @@ public final class InterceptorTest {
   }
 
   /**
-   * When an interceptor throws an unexpected exception, asynchronous callers are left hanging. The
+   * When an interceptor throws an unexpected exception, asynchronous calls are canceled. The
    * exception goes to the uncaught exception handler.
    */
   private void interceptorThrowsRuntimeExceptionAsynchronous(boolean network) throws Exception {
-    addInterceptor(network, chain -> { throw new RuntimeException("boom!"); });
+    RuntimeException boom = new RuntimeException("boom!");
+    addInterceptor(network, chain -> { throw boom; });
 
     ExceptionCatchingExecutor executor = new ExceptionCatchingExecutor();
     client = client.newBuilder()
@@ -535,9 +531,15 @@ public final class InterceptorTest {
     Request request = new Request.Builder()
         .url(server.url("/"))
         .build();
-    client.newCall(request).enqueue(callback);
+    Call call = client.newCall(request);
+    call.enqueue(callback);
+    RecordedResponse recordedResponse = callback.await(server.url("/"));
+    assertThat(recordedResponse.failure)
+        .hasMessage("canceled due to java.lang.RuntimeException: boom!");
+    assertThat(recordedResponse.failure).hasSuppressedException(boom);
+    assertThat(call.isCanceled()).isTrue();
 
-    assertThat(executor.takeException().getMessage()).isEqualTo("boom!");
+    assertThat(executor.takeException()).isEqualTo(boom);
   }
 
   @Test public void applicationInterceptorReturnsNull() throws Exception {

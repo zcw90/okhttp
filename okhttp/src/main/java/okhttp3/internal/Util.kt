@@ -48,8 +48,6 @@ import java.util.Comparator
 import java.util.LinkedHashMap
 import java.util.Locale
 import java.util.TimeZone
-import java.util.concurrent.Executor
-import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ThreadFactory
 import java.util.concurrent.TimeUnit
 import kotlin.text.Charsets.UTF_32BE
@@ -360,7 +358,7 @@ fun Source.discard(timeout: Int, timeUnit: TimeUnit): Boolean = try {
   false
 }
 
-fun Socket.connectionName(): String {
+fun Socket.peerName(): String {
   val address = remoteSocketAddress
   return if (address is InetSocketAddress) address.hostName else address.toString()
 }
@@ -381,23 +379,6 @@ inline fun threadName(name: String, block: () -> Unit) {
     block()
   } finally {
     currentThread.name = oldName
-  }
-}
-
-/** Execute [block], setting the executing thread's name to [name] for the duration. */
-inline fun Executor.execute(name: String, crossinline block: () -> Unit) {
-  execute {
-    threadName(name) {
-      block()
-    }
-  }
-}
-
-/** Executes [block] unless this executor has been shutdown, in which case this does nothing. */
-inline fun Executor.tryExecute(name: String, crossinline block: () -> Unit) {
-  try {
-    execute(name, block)
-  } catch (_: RejectedExecutionException) {
   }
 }
 
@@ -510,32 +491,8 @@ fun Long.toHexString(): String = java.lang.Long.toHexString(this)
 
 fun Int.toHexString(): String = Integer.toHexString(this)
 
-/**
- * Lock and wait a duration in nanoseconds. Unlike [java.lang.Object.wait] this interprets 0 as
- * "don't wait" instead of "wait forever".
- */
-@Throws(InterruptedException::class)
-fun Any.lockAndWaitNanos(nanos: Long) {
-  val ms = nanos / 1_000_000L
-  val ns = nanos - (ms * 1_000_000L)
-  synchronized(this) {
-    waitMillis(ms, ns.toInt())
-  }
-}
-
 @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN", "NOTHING_TO_INLINE")
 inline fun Any.wait() = (this as Object).wait()
-
-/**
- * Lock and wait a duration in milliseconds and nanos.
- * Unlike [java.lang.Object.wait] this interprets 0 as "don't wait" instead of "wait forever".
- */
-@Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
-fun Any.waitMillis(timeout: Long, nanos: Int = 0) {
-  if (timeout > 0L || nanos > 0) {
-    (this as Object).wait(timeout, nanos)
-  }
-}
 
 @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN", "NOTHING_TO_INLINE")
 inline fun Any.notify() = (this as Object).notify()
@@ -565,4 +522,8 @@ fun <T> readFieldOrNull(instance: Any, fieldType: Class<T>, fieldName: String): 
   }
 
   return null
+}
+
+internal fun <E> MutableList<E>.addIfAbsent(element: E) {
+  if (!contains(element)) add(element)
 }

@@ -44,20 +44,20 @@ class Http2Stream internal constructor(
   // Internal state is guarded by this. No long-running or potentially blocking operations are
   // performed while the lock is held.
 
-  /**
-   * The total number of bytes consumed by the application (with [FramingSource.read]), but
-   * not yet acknowledged by sending a `WINDOW_UPDATE` frame on this stream.
-   */
-  var unacknowledgedBytesRead = 0L
+  /** The total number of bytes consumed by the application. */
+  var readBytesTotal = 0L
     internal set
 
-  /**
-   * Count of bytes that can be written on the stream before receiving a window update. Even if this
-   * is positive, writes will block until there available bytes in
-   * [Http2Connection.bytesLeftInWriteWindow].
-   */
-  // guarded by this
-  var bytesLeftInWriteWindow: Long = connection.peerSettings.initialWindowSize.toLong()
+  /** The total number of bytes acknowledged by outgoing `WINDOW_UPDATE` frames. */
+  var readBytesAcknowledged = 0L
+    internal set
+
+  /** The total number of bytes produced by the application. */
+  var writeBytesTotal = 0L
+    internal set
+
+  /** The total number of bytes permitted to be produced by incoming `WINDOW_UPDATE` frame. */
+  var writeBytesMaximum: Long = connection.peerSettings.initialWindowSize.toLong()
     internal set
 
   /** Received headers yet to be [taken][takeHeaders], or [read][FramingSource.read]. */
@@ -185,7 +185,7 @@ class Http2Stream internal constructor(
     // flow-control window is fully depleted.
     if (!flushHeaders) {
       synchronized(connection) {
-        flushHeaders = connection.bytesLeftInWriteWindow == 0L
+        flushHeaders = (connection.writeBytesTotal >= connection.writeBytesMaximum)
       }
     }
 
@@ -358,14 +358,15 @@ class Http2Stream internal constructor(
             } else if (readBuffer.size > 0L) {
               // Prepare to read bytes. Start by moving them to the caller's buffer.
               readBytesDelivered = readBuffer.read(sink, minOf(byteCount, readBuffer.size))
-              unacknowledgedBytesRead += readBytesDelivered
+              readBytesTotal += readBytesDelivered
 
+              val unacknowledgedBytesRead = readBytesTotal - readBytesAcknowledged
               if (errorExceptionToDeliver == null &&
                   unacknowledgedBytesRead >= connection.okHttpSettings.initialWindowSize / 2) {
                 // Flow control: notify the peer that we're ready for more data! Only send a
                 // WINDOW_UPDATE if the stream isn't in error.
                 connection.writeWindowUpdateLater(id, unacknowledgedBytesRead)
-                unacknowledgedBytesRead = 0
+                readBytesAcknowledged = readBytesTotal
               }
             } else if (!finished && errorExceptionToDeliver == null) {
               // Nothing to do. Wait until that changes then try again.
@@ -406,6 +407,10 @@ class Http2Stream internal constructor(
       connection.updateConnectionFlowControl(read)
     }
 
+    /**
+     * Accept bytes on the connection's reader thread. This function avoids holding locks while it
+     * performs blocking reads for the incoming bytes.
+     */
     @Throws(IOException::class)
     internal fun receive(source: BufferedSource, byteCount: Long) {
       var byteCount = byteCount
@@ -437,13 +442,24 @@ class Http2Stream internal constructor(
         if (read == -1L) throw EOFException()
         byteCount -= read
 
-        // Move the received data to the read buffer to the reader can read it.
+        // Move the received data to the read buffer to the reader can read it. If this source has
+        // been closed since this read began we must discard the incoming data and tell the
+        // connection we've done so.
+        var bytesDiscarded = 0L
         synchronized(this@Http2Stream) {
-          val wasEmpty = readBuffer.size == 0L
-          readBuffer.writeAll(receiveBuffer)
-          if (wasEmpty) {
-            this@Http2Stream.notifyAll()
+          if (closed) {
+            bytesDiscarded = receiveBuffer.size
+            receiveBuffer.clear()
+          } else {
+            val wasEmpty = readBuffer.size == 0L
+            readBuffer.writeAll(receiveBuffer)
+            if (wasEmpty) {
+              this@Http2Stream.notifyAll()
+            }
           }
+        }
+        if (bytesDiscarded > 0L) {
+          updateConnectionFlowControl(bytesDiscarded)
         }
       }
     }
@@ -518,10 +534,14 @@ class Http2Stream internal constructor(
     @Throws(IOException::class)
     private fun emitFrame(outFinishedOnLastFrame: Boolean) {
       val toWrite: Long
+      val outFinished: Boolean
       synchronized(this@Http2Stream) {
         writeTimeout.enter()
         try {
-          while (bytesLeftInWriteWindow <= 0L && !finished && !closed && errorCode == null) {
+          while (writeBytesTotal >= writeBytesMaximum &&
+              !finished &&
+              !closed &&
+              errorCode == null) {
             waitForIo() // Wait until we receive a WINDOW_UPDATE for this stream.
           }
         } finally {
@@ -529,13 +549,13 @@ class Http2Stream internal constructor(
         }
 
         checkOutNotClosed() // Kick out if the stream was reset or closed while waiting.
-        toWrite = minOf(bytesLeftInWriteWindow, sendBuffer.size)
-        bytesLeftInWriteWindow -= toWrite
+        toWrite = minOf(writeBytesMaximum - writeBytesTotal, sendBuffer.size)
+        writeBytesTotal += toWrite
+        outFinished = outFinishedOnLastFrame && toWrite == sendBuffer.size && errorCode == null
       }
 
       writeTimeout.enter()
       try {
-        val outFinished = outFinishedOnLastFrame && toWrite == sendBuffer.size
         connection.writeData(id, outFinished, sendBuffer, toWrite)
       } finally {
         writeTimeout.exitAndThrowIfTimedOut()
@@ -559,8 +579,11 @@ class Http2Stream internal constructor(
     @Throws(IOException::class)
     override fun close() {
       assert(!Thread.holdsLock(this@Http2Stream))
+
+      val outFinished: Boolean
       synchronized(this@Http2Stream) {
         if (closed) return
+        outFinished = errorCode == null
       }
       if (!sink.finished) {
         // We have 0 or more frames of data, and 0 or more frames of trailers. We need to send at
@@ -573,7 +596,7 @@ class Http2Stream internal constructor(
             while (sendBuffer.size > 0L) {
               emitFrame(false)
             }
-            connection.writeHeaders(id, true, trailers!!.toHeaderList())
+            connection.writeHeaders(id, outFinished, trailers!!.toHeaderList())
           }
 
           hasData -> {
@@ -582,7 +605,7 @@ class Http2Stream internal constructor(
             }
           }
 
-          else -> {
+          outFinished -> {
             connection.writeData(id, true, null, 0L)
           }
         }
@@ -601,7 +624,7 @@ class Http2Stream internal constructor(
 
   /** [delta] will be negative if a settings frame initial window is smaller than the last. */
   fun addBytesToWriteWindow(delta: Long) {
-    bytesLeftInWriteWindow += delta
+    writeBytesMaximum += delta
     if (delta > 0L) {
       this@Http2Stream.notifyAll()
     }

@@ -1,6 +1,32 @@
 OkHttp 3.x Change Log
 =====================
 
+## Version 3.14.4
+
+_2019-09-29_
+
+ *  Fix: Cancel calls that fail due to unexpected exceptions. We had a bug where an enqueued call
+    would never call back if it crashed with an unchecked throwable, such as a
+    `NullPointerException` or `OutOfMemoryError`. We now call `Callback.onFailure()` with an
+    `IOException` that reports the call as canceled. The triggering exception is still delivered to
+    the thread's `UncaughtExceptionHandler`.
+ *  Fix: Don't evict incomplete entries when iterating the cache. We had a bug where iterating
+    `Cache.urls()` would prevent in-flight entries from being written.
+
+
+## Version 3.14.3
+
+_2019-09-10_
+
+ *  Fix: Don't lose HTTP/2 flow control bytes when incoming data races with a stream close. If this
+    happened enough then eventually the connection would stall.
+
+ *  Fix: Acknowledge and apply inbound HTTP/2 settings atomically. Previously we had a race where we
+    could use new flow control capacity before acknowledging it, causing strict HTTP/2 servers to
+    fail the call.
+
+ *  Fix: Recover gracefully when a coalesced connection immediately goes unhealthy.
+
 ## Version 3.14.2
 
 _2019-05-19_
@@ -148,6 +174,31 @@ _2019-02-04_
  *  New: API to access headers as `java.time.Instant`.
  *  New: Fail fast if a `SSLSocketFactory` is used as a `SocketFactory`.
  *  New: Log the TLS handshake in `LoggingEventListener`.
+
+
+## Version 3.12.6
+
+_2019-09-29_
+
+ *  Fix: Cancel calls that fail due to unexpected exceptions. We had a bug where an enqueued call
+    would never call back if it crashed with an unchecked throwable, such as a
+    `NullPointerException` or `OutOfMemoryError`. We now call `Callback.onFailure()` with an
+    `IOException` that reports the call as canceled. The triggering exception is still delivered to
+    the thread's `UncaughtExceptionHandler`.
+ *  Fix: Don't evict incomplete entries when iterating the cache. We had a bug where iterating
+    `Cache.urls()` would prevent in-flight entries from being written.
+
+
+## Version 3.12.5
+
+_2019-09-10_
+
+ *  Fix: Don't lose HTTP/2 flow control bytes when incoming data races with a stream close. If this
+    happened enough then eventually the connection would stall.
+
+ *  Fix: Acknowledge and apply inbound HTTP/2 settings atomically. Previously we had a race where we
+    could use new flow control capacity before acknowledging it, causing strict HTTP/2 servers to
+    fail the call.
 
 
 ## Version 3.12.4

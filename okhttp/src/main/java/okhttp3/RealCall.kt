@@ -139,10 +139,18 @@ internal class RealCall private constructor(
         } catch (e: IOException) {
           if (signalledCallback) {
             // Do not signal the callback twice!
-            Platform.get().log(INFO, "Callback failure for ${toLoggableString()}", e)
+            Platform.get().log("Callback failure for ${toLoggableString()}", INFO, e)
           } else {
             responseCallback.onFailure(this@RealCall, e)
           }
+        } catch (t: Throwable) {
+          cancel()
+          if (!signalledCallback) {
+            val canceledException = IOException("canceled due to $t")
+            canceledException.addSuppressed(t)
+            responseCallback.onFailure(this@RealCall, canceledException)
+          }
+          throw t
         } finally {
           client.dispatcher.finished(this)
         }
